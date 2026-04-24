@@ -1,2 +1,2 @@
 # wd-oauth-proxy
-A serverless Node.js OAuth Proxy handling the complex negotiation on behalf of the Workday Credstore. Built to pair with Workday Orchestrate for fully automated authentication to external services, including Google APIs.
+Built as a Google Cloud Function, this Node.js OAuth Proxy handles complex negotiations on behalf of the Workday Credstore. It pairs seamlessly with Workday Orchestrate for fully automated authentication to external services like Google APIs.
