@@ -1,0 +1,21 @@
+{
+  "name": "oauth-proxy",
+  "version": "2.1.0",
+  "description": "OAuth proxy Cloud Function for Workday External CredStore.",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "npx @google-cloud/functions-framework --target=oauthProxy",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@google-cloud/functions-framework": "^3.4.0",
+    "@google-cloud/iam-credentials": "^3.0.0",
+    "@google-cloud/secret-manager": "^5.6.0",
+    "axios": "^1.7.2",
+    "google-auth-library": "^9.11.0"
+  },
+  "devDependencies": {}
+}
