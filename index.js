@@ -59,7 +59,7 @@ async function isRateLimited(reqContext, sourceIp, clientId) {
 const tokenCache = new LRUCache({ max: 1000 });
 const inFlightRequests = new Map();
 
-async function getOrFetchToken(reqContext, targetId, scope, fetchFn) {
+async function getOrFetchToken(reqContext, clientId, targetId, scope, fetchFn) {
   const key = `${clientId}::${targetId}::${scope || 'default'}`;
 
   if (tokenCache.has(key)) {
@@ -269,7 +269,7 @@ async function handleTokenRequest(req, res, reqContext) {
         scope: activeScope,
       });
 
-      const tokenData = await getOrFetchToken(reqContext, target_id, activeScope, fetchFn);
+      const tokenData = await getOrFetchToken(reqContext, clientId, target_id, activeScope, fetchFn);
 
       auditData.success = true;
       auditData.statusCode = 200;
