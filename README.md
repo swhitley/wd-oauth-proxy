@@ -1,5 +1,3 @@
-"""# WD OAuth 2.0 Proxy
-
 ## Introduction
 
 The **WD OAuth 2.0 Proxy** is a highly resilient, serverless Node.js middleware service designed to securely broker OAuth 2.0 token exchanges. It sits exactly between enterprise platforms (such as Workday Extend, Studio, and Orchestrate) and external downstream Identity Providers (IdPs) or APIs.
@@ -35,10 +33,6 @@ This proxy is built for zero-trust environments and relies on multi-layered secu
 ## 1. Installation & Local Development
 
 Clone the repository and install dependencies:
-
-```
-```text?code_stdout&code_event_index=2
-README-v2.md generated successfully.
 
 ```bash
 npm install
@@ -138,5 +132,3 @@ Authorization: Basic <base64(client_id:proxy_secret)>
 with open("README-v2.md", "w") as f:
     f.write(markdown_content)
 print("README-v2.md generated successfully.")
-
-```
