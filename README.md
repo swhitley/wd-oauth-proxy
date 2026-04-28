@@ -77,14 +77,14 @@ You must structure your secret exactly as follows. The root keys represent the i
 ```json
 {
   "integration_name_prd": {
-    "target_url": "[https://idp.example.com/oauth/token](https://idp.example.com/oauth/token)",
+    "target_url": "https://idp.example.com/oauth/token",
     "client_id": "your-client-id-here",
     "client_secret": "your-super-secret-value",
     "strategy": "client_credentials",
     "scope": "api.read"
   },
   "integration_name_dev": {
-    "target_url": "[https://dev.idp.example.com/oauth/token](https://dev.idp.example.com/oauth/token)",
+    "target_url": "https://dev.idp.example.com/oauth/token",
     "client_id": "your-dev-client-id",
     "strategy": "jwt_bearer",
     "scope": "api.read api.write"
