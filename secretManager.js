@@ -11,7 +11,18 @@ function logError(reqContext, data, message) {
   console.error(JSON.stringify(entry));
 }
 
-const CACHE_TTL_MS = parseInt(process.env.GSM_CACHE_TTL_MS ?? '300000', 10);
+// FIX [MEDIUM]: The previous default of 300,000ms (5 minutes) creates a window
+// in which a rotated or revoked secret remains valid on every warm instance.
+// The default is now 60,000ms (1 minute) to bound the revocation lag.
+// Operators who need a longer cache for cost/latency reasons must explicitly
+// opt in by setting GSM_CACHE_TTL_MS. Set to 0 to disable caching entirely
+// (not recommended in production due to Secret Manager quota limits).
+//
+// For near-instant revocation, set GSM_CACHE_TTL_MS=0 AND subscribe to
+// Secret Manager Pub/Sub rotation events to call a /cache-bust endpoint
+// (not implemented here — see runbook section 4).
+const CACHE_TTL_MS = parseInt(process.env.GSM_CACHE_TTL_MS ?? '60000', 10);
+
 const secretCache = new LRUCache({
   max: 500,
   ttl: CACHE_TTL_MS > 0 ? CACHE_TTL_MS : 1,
@@ -36,7 +47,7 @@ function getClientPromise() {
     _clientInitFailedAt = Date.now();
     return Promise.reject(err);
   }
-  
+
   return _clientPromise;
 }
 
@@ -74,21 +85,18 @@ async function getSecret(reqContext, secretName) {
 async function getTargetConfig(reqContext, targetId) {
   const secretName = `TARGET_${targetId}`;
   const rawValue = await getSecret(reqContext, secretName);
-  
+
   try {
     const parsedConfig = JSON.parse(rawValue);
-    
-    // UPDATED to parse target_url from the new snake_case JSON
+
     const parsedUrl = new URL(parsedConfig.target_url);
     if (parsedUrl.protocol !== 'https:') {
       throw new Error('target_url must use HTTPS.');
     }
 
-    // Ensure exact matches or explicit subdomain matches with strict lowercase normalization
     const isAllowed = ALLOWED_TARGET_HOSTS.some(host => {
       const cleanHost = host.toLowerCase().trim();
       const targetHost = parsedUrl.hostname.toLowerCase();
-      
       return targetHost === cleanHost || targetHost.endsWith(`.${cleanHost}`);
     });
 
@@ -96,7 +104,7 @@ async function getTargetConfig(reqContext, targetId) {
       logError(reqContext, { hostname: parsedUrl.hostname }, '[Security] SSRF block: Hostname not in allowlist');
       throw new Error('target_url hostname is not in the allowlist.');
     }
-    
+
     return parsedConfig;
   } catch (err) {
     logError(reqContext, { targetId, err: err.message }, '[SecretManager] Target config is invalid or malformed');
@@ -108,14 +116,14 @@ async function getProxySecret(reqContext, clientId) {
   const rawValue = await getSecret(reqContext, 'PROXY_CREDENTIALS');
   try {
     const credentialsObj = JSON.parse(rawValue);
-    
+
     for (const envName of Object.keys(credentialsObj)) {
       const envData = credentialsObj[envName];
       if (envData && envData.client_id === clientId) {
         return envData.client_secret;
       }
     }
-    
+
     return null;
   } catch (err) {
     logError(reqContext, {}, '[SecretManager] Proxy credentials secret is malformed');
