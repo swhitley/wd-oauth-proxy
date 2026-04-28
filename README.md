@@ -1,5 +1,3 @@
-"""# WD OAuth 2.0 Proxy
-
 ## Introduction
 
 The **WD OAuth 2.0 Proxy** is a highly resilient, serverless Node.js middleware service designed to securely broker OAuth 2.0 token exchanges. It sits exactly between enterprise platforms (such as Workday Extend, Studio, and Orchestrate) and external downstream Identity Providers (IdPs) or APIs.
@@ -35,10 +33,6 @@ This proxy is built for zero-trust environments and relies on multi-layered secu
 ## 1. Installation & Local Development
 
 Clone the repository and install dependencies:
-
-```
-```text?code_stdout&code_event_index=2
-README-v2.md generated successfully.
 
 ```bash
 npm install
@@ -83,14 +77,14 @@ You must structure your secret exactly as follows. The root keys represent the i
 ```json
 {
   "integration_name_prd": {
-    "target_url": "[https://idp.example.com/oauth/token](https://idp.example.com/oauth/token)",
+    "target_url": "https://idp.example.com/oauth/token",
     "client_id": "your-client-id-here",
     "client_secret": "your-super-secret-value",
     "strategy": "client_credentials",
     "scope": "api.read"
   },
   "integration_name_dev": {
-    "target_url": "[https://dev.idp.example.com/oauth/token](https://dev.idp.example.com/oauth/token)",
+    "target_url": "https://dev.idp.example.com/oauth/token",
     "client_id": "your-dev-client-id",
     "strategy": "jwt_bearer",
     "scope": "api.read api.write"
@@ -134,9 +128,3 @@ Authorization: Basic <base64(client_id:proxy_secret)>
 * **Failover Backoff:** If Google Secret Manager fails to initialize, the proxy applies a strict 5-second backoff to prevent looping initialization errors.
 * **Audit Logging:** All transactions are logged using GCP structured logging, including the `traceId` to allow for end-to-end distributed tracing of failed token exchanges.
 """
-
-with open("README-v2.md", "w") as f:
-    f.write(markdown_content)
-print("README-v2.md generated successfully.")
-
-```
