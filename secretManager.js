@@ -84,9 +84,13 @@ async function getTargetConfig(reqContext, targetId) {
       throw new Error('target_url must use HTTPS.');
     }
 
-    const isAllowed = ALLOWED_TARGET_HOSTS.some(host => 
-      parsedUrl.hostname === host || parsedUrl.hostname.endsWith('.' + host)
-    );
+    // Ensure exact matches or explicit subdomain matches with strict lowercase normalization
+    const isAllowed = ALLOWED_TARGET_HOSTS.some(host => {
+      const cleanHost = host.toLowerCase().trim();
+      const targetHost = parsedUrl.hostname.toLowerCase();
+      
+      return targetHost === cleanHost || targetHost.endsWith(`.${cleanHost}`);
+    });
 
     if (!isAllowed) {
       logError(reqContext, { hostname: parsedUrl.hostname }, '[Security] SSRF block: Hostname not in allowlist');

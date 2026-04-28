@@ -60,7 +60,7 @@ const tokenCache = new LRUCache({ max: 1000 });
 const inFlightRequests = new Map();
 
 async function getOrFetchToken(reqContext, targetId, scope, fetchFn) {
-  const key = `${targetId}::${scope || 'default'}`;
+  const key = `${clientId}::${targetId}::${scope || 'default'}`;
 
   if (tokenCache.has(key)) {
     logger.info(reqContext, { targetId, scope }, '[TokenCache] Cache hit');
@@ -112,25 +112,31 @@ function isIpAllowed(ip) {
 }
 
 function safeCompare(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string') return false;
-  const maxLen = Math.max(a.length, b.length);
-  const bufA = Buffer.alloc(maxLen);
-  const bufB = Buffer.alloc(maxLen);
-  Buffer.from(a, 'utf8').copy(bufA);
-  Buffer.from(b, 'utf8').copy(bufB);
+  if (typeof a !== 'string' || typeof b !== 'string') {
+    return false;
+  }
   
-  return (a.length === b.length) && crypto.timingSafeEqual(bufA, bufB);
+  // Hash both inputs to fixed-length SHA-256 digests to prevent length-based early exits
+  const hashA = crypto.createHash('sha256').update(a).digest();
+  const hashB = crypto.createHash('sha256').update(b).digest();
+  
+  return crypto.timingSafeEqual(hashA, hashB);
 }
 
 function parseBasicAuth(authHeader) {
-  if (!authHeader) return null;
-  const match = authHeader.match(/^basic\s+(.*)$/i);
-  if (!match) return null;
-  const b64 = match[1].trim();
-  const decoded = Buffer.from(b64, 'base64').toString('utf8');
-  const delimIdx = decoded.indexOf(':');
-  if (delimIdx === -1) return null;
-  return { id: decoded.substring(0, delimIdx), secret: decoded.substring(delimIdx + 1) };
+  const b64auth = (authHeader || '').split(' ')[1] || '';
+  const decoded = Buffer.from(b64auth, 'base64').toString();
+  
+  // Isolate on the first colon to preserve any colons within the secret itself
+  const colonIndex = decoded.indexOf(':');
+  if (colonIndex === -1) {
+    return { clientId: decoded, clientSecret: '' };
+  }
+  
+  return {
+    clientId: decoded.substring(0, colonIndex),
+    clientSecret: decoded.substring(colonIndex + 1)
+  };
 }
 
 function getTraceContext() {
@@ -174,8 +180,8 @@ async function handleTokenRequest(req, res, reqContext) {
         auditData.failReason = 'malformed_auth_header';
         return res.status(401).json({ error: 'invalid_client', detail: 'Authorization header is present but malformed. Must be valid Basic Auth.' });
       }
-      clientId = auth.id;
-      clientSecret = auth.secret;
+      clientId = auth.clientId;
+      clientSecret = auth.clientSecret;
     } else if (req.body && req.body.client_id && req.body.client_secret) {
       clientId = req.body.client_id;
       clientSecret = req.body.client_secret;
@@ -308,7 +314,7 @@ functions.http('oauthProxy', async (req, res) => {
     return res.status(403).json({ error: 'access_denied', detail: 'IP address not authorized.' });
   }
 
-  if (req.path.endsWith('/token') && (req.method === 'POST' || req.method === 'GET')) {
+  if (req.path.endsWith('/token') && req.method === 'POST') {
     return handleTokenRequest(req, res, reqContext);
   }
   
