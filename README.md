@@ -43,7 +43,7 @@ To run the function locally using the Google Cloud Functions Framework:
 ```bash
 npm start
 ```
-*Note: Local development requires you to authenticate with GCP via `gcloud auth application-default login` so the application can resolve Secret Manager and IAM bindings.*
+> **Note:** Local development requires you to authenticate with GCP via `gcloud auth application-default login` so the application can resolve Secret Manager and IAM bindings.
 
 ---
 
@@ -61,6 +61,8 @@ The application relies on specific environment variables for runtime configurati
 | Variable | Description | Default | Required |
 | :--- | :--- | :--- | :--- |
 | `ALLOWED_WORKDAY_IPS` | Comma-separated list of CIDR blocks for inbound traffic. | *None* | Yes |
+| `ALLOWED_TARGET_HOSTS` | Comma-separated list of approved downstream domains to prevent SSRF. | *None* | Yes |
+| `RATE_LIMIT_THRESHOLD` | Maximum permitted token requests per minute per client instance. | `100` | No |
 | `GSM_CACHE_TTL_MS` | Milliseconds to cache secrets in memory to prevent GSM quota exhaustion. | `300000` (5 mins) | No |
 | `GOOGLE_CLOUD_PROJECT` | Automatically injected by GCP serverless environments. Used for trace logging. | *Injected* | No |
 
@@ -68,63 +70,73 @@ The application relies on specific environment variables for runtime configurati
 
 ## 3. Secret Manager Configuration
 
-The proxy dynamically resolves routing, target URLs, and credentials based on a single JSON payload stored in Google Secret Manager under the secret name: **`PROXY_CREDENTIALS`**.
+The proxy relies on a split-secret architecture to separate proxy authentication from downstream target configurations. Both configurations are securely stored in Google Secret Manager.
 
-### `PROXY_CREDENTIALS` JSON Schema Contract
-
-You must structure your secret exactly as follows. The root keys represent the isolated environments or target integrations.
+### 1. `PROXY_CREDENTIALS` (Proxy Authentication)
+A single JSON payload storing the accepted proxy client credentials.
 
 ```json
 {
-  "integration_name_prd": {
-    "target_url": "https://idp.example.com/oauth/token",
-    "client_id": "your-client-id-here",
-    "client_secret": "your-super-secret-value",
-    "strategy": "client_credentials",
-    "scope": "api.read"
-  },
-  "integration_name_dev": {
-    "target_url": "https://dev.idp.example.com/oauth/token",
-    "client_id": "your-dev-client-id",
-    "strategy": "jwt_bearer",
-    "scope": "api.read api.write"
+  "client_1": {
+    "client_id": "your-proxy-client-id",
+    "client_secret": "your-proxy-super-secret-value"
   }
 }
 ```
 
-#### Field Definitions:
-* `target_url` (Required): The strict HTTPS endpoint of the downstream identity provider. This MUST match your configured `ALLOWED_TARGET_HOSTS` allowlist.
-* `client_id` (Required): The identifier used to match the inbound Basic Auth request to this specific configuration block.
+### 2. `TARGET_{target_id}` (Downstream Target Configurations)
+Each downstream integration requires its own secret prefixed with `TARGET_` (e.g., `TARGET_GOOGLE_API`). 
+
+```json
+{
+  "target_url": "https://oauth2.googleapis.com/token",
+  "client_id": "your-downstream-client-id",
+  "client_secret": "your-downstream-secret",
+  "strategy": "jwt_bearer",
+  "default_scope": "https://www.googleapis.com/auth/cloud-platform",
+  "allowed_scopes": [
+    "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/spreadsheets"
+  ]
+}
+```
+
+#### Field Definitions (`TARGET_{target_id}`):
+* `target_url` (Required): The strict HTTPS endpoint of the downstream IdP. This MUST match a domain in your `ALLOWED_TARGET_HOSTS` allowlist.
+* `client_id` (Required): The IdP client ID or Service Account email.
 * `client_secret` (Conditional): Required for `client_credentials`. Ignored for `jwt_bearer`.
 * `strategy` (Required): Must be either `client_credentials` or `jwt_bearer`.
-* `scope` (Optional): Space-separated list of OAuth scopes to request from the downstream provider.
+* `default_scope` (Optional): The scope to request if the client omits the scope parameter.
+* `allowed_scopes` (Required): An array of explicitly permitted scopes. The proxy will reject requests for scopes not listed here with a `403 Forbidden`.
 
 ---
 
 ## 4. Usage & Flow
 
-Downstream enterprise systems invoke this proxy via an HTTP POST request. The proxy expects the `client_id` and a predefined proxy authentication token (not the actual IdP secret) to be passed via standard Basic Auth.
+Downstream enterprise systems invoke this proxy via an HTTP POST request. The proxy expects the `client_id` and a predefined proxy authentication token to be passed via standard Basic Auth, and a `target_id` to route the request appropriately.
 
 **Request Format:**
 ```http
-POST /oauthProxy HTTP/1.1
+POST /token?target_id=GOOGLE_API&scope=https://www.googleapis.com/auth/spreadsheets HTTP/1.1
 Host: your-cloud-function-url.a.run.app
 Authorization: Basic <base64(client_id:proxy_secret)>
 ```
+*(Note: `target_id` and `scope` can alternatively be passed as `application/x-www-form-urlencoded` or `application/json` in the POST body).*
 
 **Execution Flow:**
-1. The proxy decodes the Basic Auth header to extract the `client_id` and the `proxy_secret`.
-2. It queries `PROXY_CREDENTIALS` in Secret Manager to find the configuration block matching the `client_id`.
-3. It performs a constant-time cryptographic comparison between the provided `proxy_secret` and the expected secret to prevent timing attacks.
-4. It resolves the requested `strategy` (e.g., Client Credentials vs. JWT Bearer).
-5. It invokes the downstream `target_url` using an HTTP client equipped with exponential backoff and randomized jitter to handle transient network instability.
-6. The resulting downstream OAuth token is returned to the caller.
+1. The proxy validates the requested `target_id` and standardizes the inbound HTTP path.
+2. It decodes the Basic Auth header to extract the proxy `client_id` and `proxy_secret`.
+3. It queries `PROXY_CREDENTIALS` in Secret Manager and performs a constant-time cryptographic comparison against the expected proxy secret to prevent timing attacks.
+4. It resolves the specific `TARGET_{target_id}` configuration from Secret Manager.
+5. It validates the requested `scope` against the target's `allowed_scopes` array.
+6. It resolves the requested `strategy` (e.g., Client Credentials vs. JWT Bearer).
+7. It invokes the downstream `target_url` using an HTTP client equipped with native GCP SDK exponential backoff to handle transient network instability.
+8. The resulting downstream OAuth token is returned to the caller.
 
 ---
 
 ## 5. Resiliency & Maintenance
 
 * **Rate Limiting:** In-flight concurrent requests for the same token are bundled to prevent cache stampedes against the downstream IdP.
-* **Failover Backoff:** If Google Secret Manager fails to initialize, the proxy applies a strict 5-second backoff to prevent looping initialization errors.
+* **Failover Backoff:** If Google Secret Manager API calls fail or timeout, the proxy utilizes native GCP SDK (GAX) exponential backoff and retries to seamlessly handle transient upstream instability.
 * **Audit Logging:** All transactions are logged using GCP structured logging, including the `traceId` to allow for end-to-end distributed tracing of failed token exchanges.
-"""
