@@ -128,7 +128,3 @@ Authorization: Basic <base64(client_id:proxy_secret)>
 * **Failover Backoff:** If Google Secret Manager fails to initialize, the proxy applies a strict 5-second backoff to prevent looping initialization errors.
 * **Audit Logging:** All transactions are logged using GCP structured logging, including the `traceId` to allow for end-to-end distributed tracing of failed token exchanges.
 """
-
-with open("README-v2.md", "w") as f:
-    f.write(markdown_content)
-print("README-v2.md generated successfully.")
