@@ -1,7 +1,7 @@
 {
   "name": "oauth-proxy",
   "version": "1.0.0",
-  "description": "Enterprise OAuth 2.0 Proxy",
+  "description": "Production-grade Enterprise OAuth 2.0 Proxy",
   "main": "index.js",
   "engines": {
     "node": ">=20.0.0"

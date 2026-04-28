@@ -19,14 +19,12 @@ async function fetchToken({ targetUrl, clientId, scope, httpClient }) {
     aud: targetUrl,
     iat,
     exp: iat + 300, 
-    jti: crypto.randomUUID(), 
+    jti: crypto.randomUUID()
   };
 
-  if (scope) {
-    payload.scope = scope;
-  }
+  if (scope) payload.scope = scope;
 
-  // Uses GCP IAM to sign the JWT without ever exposing the private key to this function's memory
+  // Use GCP Service Account to sign the JWT, keeping private keys out of proxy memory
   const [response] = await iamClient.signJwt({
     name: `projects/-/serviceAccounts/${clientId}`,
     payload: JSON.stringify(payload),
