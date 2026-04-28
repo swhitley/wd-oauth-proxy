@@ -1,278 +1,316 @@
 'use strict';
 
-/**
- * index.js — OAuth Proxy Cloud Function
- *
- * Acts as a proxy for OAuth token requests when vendors do not conform to
- * the credential format expected by Workday's External CredStore.
- *
- * ─────────────────────────────────────────────────────────────────────────────
- * How it works
- * ─────────────────────────────────────────────────────────────────────────────
- *  1. Workday's CredStore calls POST /token using its standard client_credentials
- *     flow, presenting only the proxy's own client_id and client_secret.
- *  2. The proxy validates those credentials against Secret Manager.
- *  3. The proxy looks up the downstream vendor's client_id and client_secret
- *     from Secret Manager using target_id as a key — Workday never sees or
- *     stores downstream credentials.
- *  4. The proxy forwards the token request to the vendor's endpoint (target_url)
- *     and returns the response verbatim to Workday.
- *
- * ─────────────────────────────────────────────────────────────────────────────
- * Request format  POST /token
- * ─────────────────────────────────────────────────────────────────────────────
- * Query parameters:
- *   target_url  {string}  Required. Token endpoint of the downstream OAuth server.
- *   target_id   {string}  Required. Key used to look up downstream credentials in
- *                         Secret Manager (see secretManager.js for naming rules).
- *   provider    {string}  Optional. Named OAuth provider module (default: "generic").
- *
- * Authentication (Workday sends one of these — Basic Auth is preferred):
- *   Basic Auth header:  Authorization: Basic base64(<proxy_client_id>:<proxy_client_secret>)
- *   Body params:        client_id=<proxy_client_id>&client_secret=<proxy_client_secret>
- *
- * Body (application/x-www-form-urlencoded):
- *   grant_type  client_credentials  (standard; required by most CredStore configs)
- *   scope       Optional. Forwarded verbatim to the downstream token endpoint.
- *
- * ─────────────────────────────────────────────────────────────────────────────
- * Environment variables
- * ─────────────────────────────────────────────────────────────────────────────
- *   GCP_PROJECT_ID / GOOGLE_CLOUD_PROJECT
- *       GCP project that owns the Secret Manager secrets.
- *
- *   GSM_SERVICE_ACCOUNT_KEY_JSON  |
- *   GSM_SERVICE_ACCOUNT_EMAIL     |  See secretManager.js for details.
- *   GSM_CACHE_TTL_MS              |
- *
- *   ALLOWED_TARGET_URLS
- *       Comma-separated list of URL prefixes that are permitted as target_url
- *       values.  Any request whose target_url does not start with one of these
- *       prefixes is rejected with HTTP 400.
- *       Example: "https://login.microsoftonline.com,https://accounts.google.com"
- *       Leave unset (or empty) only in local development — in production this
- *       MUST be configured to prevent SSRF attacks.
- */
-
 const functions = require('@google-cloud/functions-framework');
-const { getProxyCredentials, getTargetCredentials } = require('./secretManager');
-const { getProvider, listProviders } = require('./providers');
+const crypto = require('crypto');
+const { z } = require('zod');
+const ipRangeCheck = require('ip-range-check');
+const { LRUCache } = require('lru-cache');
 
-// ─── SSRF allowlist ───────────────────────────────────────────────────────────
+const { getProxySecret, getTargetConfig } = require('./secretManager');
+const { getStrategy } = require('./strategies');
 
-/**
- * Parses the ALLOWED_TARGET_URLS environment variable into an array of
- * permitted URL prefixes.  An empty array means no restriction (dev only).
- *
- * @returns {string[]}
- */
-function getAllowedTargetPrefixes() {
-  const raw = process.env.ALLOWED_TARGET_URLS || '';
-  return raw
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+// ============================================================================
+// 1. LOGGER UTILITY
+// ============================================================================
+function writeLog(severity, reqContext, data, message) {
+  const entry = { severity, message, ...data };
+  if (reqContext?.traceId && process.env.GOOGLE_CLOUD_PROJECT) {
+    entry['logging.googleapis.com/trace'] = `projects/${process.env.GOOGLE_CLOUD_PROJECT}/traces/${reqContext.traceId}`;
+  }
+  if (severity === 'ERROR' || severity === 'CRITICAL') {
+    console.error(JSON.stringify(entry));
+  } else {
+    console.log(JSON.stringify(entry));
+  }
 }
 
-/**
- * Returns true if the supplied URL is permitted by the allowlist.
- * When the allowlist is empty (not configured), all URLs are allowed and a
- * warning is emitted — this state is only acceptable in local development.
- *
- * @param {string} url
- * @returns {boolean}
- */
-function isTargetUrlAllowed(url) {
-  const prefixes = getAllowedTargetPrefixes();
+const logger = {
+  info: (reqContext, data, message) => writeLog('INFO', reqContext, data, message),
+  warn: (reqContext, data, message) => writeLog('WARNING', reqContext, data, message),
+  error: (reqContext, data, message) => writeLog('ERROR', reqContext, data, message),
+  audit: (reqContext, auditData) => {
+    const severity = auditData.statusCode >= 400 ? 'ERROR' : 'NOTICE';
+    writeLog(severity, reqContext, { audit_log: true, ...auditData }, 'OAuth Proxy Audit Event');
+  }
+};
 
-  if (prefixes.length === 0) {
-    console.warn(
-      '[Security] ALLOWED_TARGET_URLS is not configured. ' +
-      'All target_url values are permitted. Set this variable in production.'
-    );
+// ============================================================================
+// 2. RATE LIMITER UTILITY
+// ============================================================================
+const rateLimitCache = new LRUCache({ max: 5000, ttl: 60000 });
+const MAX_REQUESTS_PER_MINUTE = 100; 
+
+async function isRateLimited(reqContext, sourceIp, clientId) {
+  const key = `${sourceIp}::${clientId || 'unauthenticated'}`;
+  const currentCount = rateLimitCache.get(key) || 0;
+  
+  if (currentCount >= MAX_REQUESTS_PER_MINUTE) {
+    logger.warn(reqContext, { sourceIp, clientId, currentCount }, '[RateLimiter] Exceeded per-instance rate limit');
     return true;
   }
-
-  return prefixes.some((prefix) => url.startsWith(prefix));
+  
+  rateLimitCache.set(key, currentCount + 1);
+  return false;
 }
 
-// ─── Helper: parse Basic Auth header ─────────────────────────────────────────
+// ============================================================================
+// 3. TOKEN CACHE UTILITY
+// ============================================================================
+const tokenCache = new LRUCache({ max: 1000 });
+const inFlightRequests = new Map();
 
-/**
- * Extracts credentials from an HTTP Basic Auth header.
- * Splits on the first colon only (RFC 7617 §2).
- *
- * @param {string} authHeader
- * @returns {{ id: string, secret: string }|null}
- */
+async function getOrFetchToken(reqContext, targetId, scope, fetchFn) {
+  const key = `${targetId}::${scope || 'default'}`;
+
+  if (tokenCache.has(key)) {
+    logger.info(reqContext, { targetId, scope }, '[TokenCache] Cache hit');
+    return tokenCache.get(key);
+  }
+
+  if (inFlightRequests.has(key)) {
+    logger.info(reqContext, { targetId, scope }, '[TokenCache] Attaching to in-flight request');
+    return inFlightRequests.get(key);
+  }
+
+  logger.info(reqContext, { targetId, scope }, '[TokenCache] Cache miss, fetching upstream');
+  const fetchPromise = fetchFn()
+    .then((tokenResponse) => {
+      let expiresIn = parseInt(tokenResponse.expires_in, 10);
+      if (isNaN(expiresIn) || expiresIn <= 0) {
+        logger.warn(reqContext, { targetId }, '[TokenCache] Upstream missing expires_in. Defaulting to 3600s.');
+        expiresIn = 3600;
+      }
+      const bufferSeconds = 30;
+      const ttlMs = Math.max(1, expiresIn - bufferSeconds) * 1000;
+      
+      tokenCache.set(key, tokenResponse, { ttl: ttlMs });
+      logger.info(reqContext, { targetId, scope, ttlMs }, '[TokenCache] Token cached successfully');
+      
+      return tokenResponse;
+    })
+    .finally(() => {
+      inFlightRequests.delete(key);
+    });
+
+  inFlightRequests.set(key, fetchPromise);
+  return fetchPromise;
+}
+
+// ============================================================================
+// 4. CORE PROXY LOGIC
+// ============================================================================
+const ALLOWED_WORKDAY_IPS = (process.env.ALLOWED_WORKDAY_IPS || '').split(',').map(ip => ip.trim()).filter(Boolean);
+if (ALLOWED_WORKDAY_IPS.length === 0) {
+  throw new Error('FATAL: ALLOWED_WORKDAY_IPS environment variable must be set. Proxy cannot fail open.');
+}
+
+const TargetIdSchema = z.string().regex(/^[A-Z0-9_]+$/, "Invalid format").max(64);
+const ScopeSchema = z.string().regex(/^[a-zA-Z0-9_:\.\/ -]+$/, "Invalid scope characters").max(256).optional();
+
+function isIpAllowed(ip) {
+  return ipRangeCheck(ip, ALLOWED_WORKDAY_IPS);
+}
+
+function safeCompare(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const maxLen = Math.max(a.length, b.length);
+  const bufA = Buffer.alloc(maxLen);
+  const bufB = Buffer.alloc(maxLen);
+  Buffer.from(a, 'utf8').copy(bufA);
+  Buffer.from(b, 'utf8').copy(bufB);
+  
+  return (a.length === b.length) && crypto.timingSafeEqual(bufA, bufB);
+}
+
 function parseBasicAuth(authHeader) {
-  if (!authHeader || !authHeader.startsWith('Basic ')) return null;
-
-  const decoded   = Buffer.from(authHeader.slice(6), 'base64').toString('utf8');
-  const delimIdx  = decoded.indexOf(':');
+  if (!authHeader) return null;
+  const match = authHeader.match(/^basic\s+(.*)$/i);
+  if (!match) return null;
+  const b64 = match[1].trim();
+  const decoded = Buffer.from(b64, 'base64').toString('utf8');
+  const delimIdx = decoded.indexOf(':');
   if (delimIdx === -1) return null;
-
-  return {
-    id:     decoded.substring(0, delimIdx),
-    secret: decoded.substring(delimIdx + 1),
-  };
+  return { id: decoded.substring(0, delimIdx), secret: decoded.substring(delimIdx + 1) };
 }
 
-// ─── Route: POST /token ───────────────────────────────────────────────────────
+function getTraceContext() {
+  return { traceId: crypto.randomUUID() };
+}
 
-/**
- * @param {import('express').Request}  req
- * @param {import('express').Response} res
- */
-async function handleTokenRequest(req, res) {
-  const { target_url, target_id, provider: providerId } = req.query;
+function getRealIp(req) {
+  return req.ip;
+}
 
-  // 1. Required query params.
-  if (!target_url || !target_id) {
-    return res.status(400).json({
-      error:  'missing_query_params',
-      detail: '"target_url" and "target_id" are required query parameters.',
-    });
-  }
-
-  // 2. SSRF guard — validate target_url against the allowlist before anything
-  //    else so we don't leak information about what happens next.
-  if (!isTargetUrlAllowed(target_url)) {
-    console.warn(`[Security] Rejected disallowed target_url: ${target_url}`);
-    return res.status(400).json({
-      error:  'target_url_not_allowed',
-      detail: 'The supplied target_url is not in the list of permitted endpoints.',
-    });
-  }
-
-  // 3. Extract proxy credentials from the incoming request.
-  //    Basic Auth takes precedence over body parameters.
-  const basicAuth    = parseBasicAuth(req.headers.authorization || '');
-  const incomingId   = basicAuth?.id     ?? req.body?.client_id;
-  const incomingSecret = basicAuth?.secret ?? req.body?.client_secret;
-
-  if (!incomingId || !incomingSecret) {
-    return res.status(400).json({
-      error:  'missing_credentials',
-      detail: 'Proxy client_id and client_secret are required.',
-    });
-  }
-
-  console.log(`[Auth] Validating proxy credential for client_id: ${incomingId}`);
-
-  // 4. Validate proxy credentials against Secret Manager.
-  let proxyCreds;
-  try {
-    proxyCreds = await getProxyCredentials();
-  } catch (err) {
-    console.error('[SecretManager] Failed to load proxy credentials:', err.message);
-    return res.status(500).json({
-      error:  'server_error',
-      detail: 'Failed to retrieve proxy credentials.',
-    });
-  }
-
-  if (incomingId !== proxyCreds.clientId || incomingSecret !== proxyCreds.clientSecret) {
-    console.warn(`[Security] Unauthorized access attempt by client_id: ${incomingId}`);
-    return res.status(401).json({ error: 'invalid_client' });
-  }
-
-  // 5. Load downstream credentials from Secret Manager.
-  //    The caller (Workday) never provides or sees these values.
-  let targetCreds;
-  try {
-    targetCreds = await getTargetCredentials(target_id);
-  } catch (err) {
-    console.error(
-      `[SecretManager] Failed to load credentials for target_id "${target_id}":`,
-      err.message
-    );
-    // Return a generic error — do not reveal which secret name was missing.
-    return res.status(400).json({
-      error:  'unknown_target',
-      detail: `No credentials found for target_id "${target_id}". ` +
-              'Ensure the corresponding secrets exist in Secret Manager.',
-    });
-  }
-
-  // 6. Resolve the OAuth provider module.
-  const provider = getProvider(providerId);
-
-  if (provider.meta.implemented === false) {
-    return res.status(501).json({
-      error:  'provider_not_implemented',
-      detail: `Provider "${provider.meta.id}" is registered but not yet implemented.`,
-    });
-  }
-
-  console.log(
-    `[Proxy] Routing to provider "${provider.meta.id}" → ${target_url} ` +
-    `(target_id: ${target_id})`
-  );
-
-  // 7. Fetch the downstream token and return it verbatim.
-  //    We intentionally do not wrap or reformat the vendor's response so that
-  //    Workday receives exactly what the vendor returned — including any
-  //    vendor-specific fields and error shapes.
-  const scope = req.body?.scope || req.query?.scope;
+async function handleTokenRequest(req, res, reqContext) {
+  const auditData = {
+    sourceIp: getRealIp(req),
+    targetId: 'unparsed',
+    proxyClientId: 'unknown',
+    scope: 'none',
+    success: false,
+    statusCode: 500,
+    failReason: 'unknown'
+  };
 
   try {
-    const tokenResponse = await provider.fetchToken({
-      targetUrl:       target_url,
-      clientId:        targetCreds.clientId,
-      clientSecret:    targetCreds.clientSecret,
-      scope,
-      extraBodyFields: {},
-    });
-
-    return res.status(200).json(tokenResponse);
-  } catch (err) {
-    // Pass the upstream HTTP status and body through verbatim so Workday
-    // sees the vendor's actual error rather than a generic wrapper.
-    const upstreamStatus = err.response?.status;
-    const upstreamBody   = err.response?.data;
-
-    if (upstreamStatus && upstreamBody) {
-      console.error(
-        `[Provider: ${provider.meta.id}] Upstream ${upstreamStatus} error:`,
-        upstreamBody
-      );
-      return res.status(upstreamStatus).json(upstreamBody);
+    if (req.method !== 'GET') {
+      const contentType = (req.headers['content-type'] || '').toLowerCase();
+      if (!contentType.includes('application/x-www-form-urlencoded') && !contentType.includes('application/json')) {
+        auditData.statusCode = 415;
+        auditData.failReason = 'unsupported_media_type';
+        return res.status(415).json({ error: 'invalid_request', detail: 'Unsupported Content-Type. Use application/x-www-form-urlencoded or application/json.' });
+      }
     }
 
-    // Network-level failure (no HTTP response received).
-    console.error(`[Provider: ${provider.meta.id}] Request failed:`, err.message);
-    return res.status(502).json({
-      error:  'upstream_unreachable',
-      detail: 'The downstream token endpoint did not respond.',
-    });
+    let clientId = null;
+    let clientSecret = null;
+    
+    // Extract credentials from Header OR Body
+    const authHeader = req.headers.authorization || req.headers.Authorization;
+    if (authHeader) {
+      const auth = parseBasicAuth(authHeader);
+      if (!auth) {
+        auditData.statusCode = 401;
+        auditData.failReason = 'malformed_auth_header';
+        return res.status(401).json({ error: 'invalid_client', detail: 'Authorization header is present but malformed. Must be valid Basic Auth.' });
+      }
+      clientId = auth.id;
+      clientSecret = auth.secret;
+    } else if (req.body && req.body.client_id && req.body.client_secret) {
+      clientId = req.body.client_id;
+      clientSecret = req.body.client_secret;
+    }
+
+    if (!clientId || !clientSecret) {
+      auditData.statusCode = 401;
+      auditData.failReason = 'missing_credentials';
+      return res.status(401).json({ error: 'invalid_client', detail: 'Missing client credentials. Provide Authorization header or client_id and client_secret in the body.' });
+    }
+
+    auditData.proxyClientId = clientId;
+
+    if (await isRateLimited(reqContext, auditData.sourceIp, clientId)) {
+      auditData.statusCode = 429;
+      auditData.failReason = 'rate_limit_exceeded';
+      return res.status(429).json({ error: 'too_many_requests', detail: 'Rate limit exceeded.' });
+    }
+
+    // Allow target_id to come from query string or body
+    const targetIdInput = req.query.target_id || req.body?.target_id;
+    const parsedTargetId = TargetIdSchema.safeParse(targetIdInput);
+    if (!parsedTargetId.success) {
+      auditData.statusCode = 400;
+      auditData.failReason = 'invalid_target_id';
+      return res.status(400).json({ error: 'invalid_request', detail: 'Invalid target_id format.' });
+    }
+    const target_id = parsedTargetId.data;
+    auditData.targetId = target_id;
+
+    const rawScope = req.body?.scope || req.query?.scope;
+    const parsedScope = ScopeSchema.safeParse(rawScope);
+    if (!parsedScope.success) {
+      auditData.statusCode = 400;
+      auditData.failReason = 'invalid_scope';
+      return res.status(400).json({ error: 'invalid_request', detail: 'Invalid scope format.' });
+    }
+
+    const proxySecret = await getProxySecret(reqContext, clientId);
+    if (!proxySecret || !safeCompare(clientSecret, proxySecret)) {
+      logger.error(reqContext, {}, '[Security] Invalid proxy credentials supplied');
+      auditData.statusCode = 401;
+      auditData.failReason = 'invalid_credentials';
+      return res.status(401).json({ error: 'invalid_client', detail: 'Proxy authentication failed.' });
+    }
+
+    let config;
+    try {
+      config = await getTargetConfig(reqContext, target_id);
+    } catch (err) {
+      auditData.statusCode = 404;
+      auditData.failReason = 'target_not_found';
+      return res.status(404).json({ error: 'target_not_found', detail: 'Target configuration not found.' });
+    }
+
+    // UPDATED to use snake_case from JSON configuration
+    const activeScope = parsedScope.data || config.default_scope;
+    auditData.scope = activeScope;
+
+    if (activeScope) {
+      // UPDATED to use snake_case from JSON configuration
+      if (!Array.isArray(config.allowed_scopes) || !config.allowed_scopes.includes(activeScope)) {
+        logger.error(reqContext, { target_id, activeScope }, '[Security] Requested scope is not in the allowed_scopes list for this target');
+        auditData.statusCode = 403;
+        auditData.failReason = 'unauthorized_scope';
+        return res.status(403).json({ error: 'invalid_scope', detail: 'The requested scope is not permitted for this target.' });
+      }
+    }
+
+    let strategy;
+    try {
+      strategy = getStrategy(config.strategy || 'client_credentials');
+    } catch (err) {
+      logger.error(reqContext, { err: err.message, strategy: config.strategy }, 'Strategy resolution failed');
+      auditData.statusCode = 500;
+      auditData.failReason = 'invalid_strategy_config';
+      return res.status(500).json({ error: 'configuration_error', detail: 'Invalid strategy configured.' });
+    }
+
+    try {
+      const fetchFn = () => strategy.fetchToken({
+        targetUrl: config.target_url,
+        clientId: config.client_id,
+        clientSecret: config.client_secret,
+        scope: activeScope,
+      });
+
+      const tokenData = await getOrFetchToken(reqContext, target_id, activeScope, fetchFn);
+
+      auditData.success = true;
+      auditData.statusCode = 200;
+      auditData.failReason = null;
+      return res.status(200).json(tokenData);
+
+    } catch (err) {
+      const upstreamStatus = err.response?.status || 502;
+      logger.error(reqContext, { 
+        err: err.message, target_id, rawUpstreamData: err.response?.data, upstreamStatus 
+      }, 'Downstream exchange failed');
+      
+      auditData.statusCode = upstreamStatus;
+      auditData.failReason = 'upstream_rejection';
+      return res.status(upstreamStatus).json({ 
+        error: 'upstream_exchange_failed', detail: 'The downstream identity provider rejected the request.' 
+      });
+    }
+
+  } catch (fatalErr) {
+    logger.error(reqContext, { err: fatalErr.message, stack: fatalErr.stack }, 'Unhandled execution error');
+    auditData.statusCode = 500;
+    auditData.failReason = 'internal_exception';
+    return res.status(500).json({ error: 'server_error', detail: 'An unexpected error occurred.' });
+  } finally {
+    logger.audit(reqContext, auditData);
   }
 }
-
-// ─── Route: GET /providers ────────────────────────────────────────────────────
-
-/**
- * Introspection endpoint — returns registered provider metadata.
- * Requires no authentication; exposes no secrets.
- *
- * @param {import('express').Response} res
- */
-function handleProvidersRequest(res) {
-  return res.status(200).json({ providers: listProviders() });
-}
-
-// ─── Cloud Function entry point ───────────────────────────────────────────────
 
 functions.http('oauthProxy', async (req, res) => {
-  const path = req.path.replace(/\/+$/, '') || '/';
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Content-Security-Policy', "default-src 'none'");
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  res.setHeader('Referrer-Policy', 'no-referrer');
 
-  if (path.endsWith('/token') && req.method === 'POST') {
-    return handleTokenRequest(req, res);
+  const reqContext = getTraceContext();
+  const sourceIp = getRealIp(req);
+
+  if (!isIpAllowed(sourceIp)) {
+    logger.warn(reqContext, { sourceIp }, '[Security] Request blocked at network perimeter');
+    return res.status(403).json({ error: 'access_denied', detail: 'IP address not authorized.' });
   }
 
-  if (path.endsWith('/providers') && req.method === 'GET') {
-    return handleProvidersRequest(res);
+  if (req.path.endsWith('/token') && (req.method === 'POST' || req.method === 'GET')) {
+    return handleTokenRequest(req, res, reqContext);
   }
-
-  return res.status(404).send();
+  
+  return res.status(404).json({ error: 'not_found' });
 });
