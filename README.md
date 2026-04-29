@@ -62,7 +62,7 @@ gcloud run deploy wd-oauth-proxy \
   --source . \
   --region YOUR_REGION \
   --allow-unauthenticated \
-  --set-env-vars="ALLOWED_WORKDAY_IPS=35.80.211.71,35.155.167.195,44.234.22.80,44.234.22.81,44.234.22.82,44.234.22.83,54.212.47.21,ALLOWED_TARGET_HOSTS=oauth2.googleapis.com"
+  --set-env-vars="^|^ALLOWED_WORKDAY_IPS=35.80.211.71,35.155.167.195,44.234.22.80,44.234.22.81,44.234.22.82,44.234.22.83,54.212.47.21|ALLOWED_TARGET_HOSTS=oauth2.googleapis.com"
 ```
 *(Note: Restrict `ALLOWED_WORKDAY_IPS` to your actual Workday tenant NAT IPs for production).*
 
