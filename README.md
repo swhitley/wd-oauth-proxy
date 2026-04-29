@@ -124,8 +124,6 @@ Downstream enterprise systems invoke this proxy via an HTTP POST request. The pr
 
 **Request Format:**
 
-<img width="590" height="756" alt="image" src="https://github.com/user-attachments/assets/70ffcc22-2558-4ebb-ae60-73241bd5374e" />
-
 On Workday's External Client CredStore, the `Token Endpoint` is the critical field for the token URL.  Workday does not pass the `Scope` field, so include the scope query string variable in the Token Endpoint field.
 
 ```http
@@ -134,6 +132,8 @@ Host: your-cloud-function-url.a.run.app
 Authorization: Basic <base64(client_id:proxy_secret)>
 ```
 *(Note: `target_id` and `scope` can alternatively be passed as `application/x-www-form-urlencoded` or `application/json` in the POST body).*
+
+<img width="590" height="756" alt="image" src="https://github.com/user-attachments/assets/70ffcc22-2558-4ebb-ae60-73241bd5374e" />
 
 **Execution Flow:**
 1. The proxy validates the requested `target_id` and standardizes the inbound HTTP path.
