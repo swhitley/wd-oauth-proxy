@@ -108,7 +108,7 @@ npm start
 
 ### 2. Infrastructure Configuration (GCP)
 
-<img width="1361" height="692" alt="image" src="[https://github.com/user-attachments/assets/ae7c8b53-354a-4de3-9a90-c166a0ff20c2](https://github.com/user-attachments/assets/ae7c8b53-354a-4de3-9a90-c166a0ff20c2)" />
+<img width="1361" height="692" alt="image" src="https://github.com/user-attachments/assets/ae7c8b53-354a-4de3-9a90-c166a0ff20c2" />
 
 
 #### Required IAM Roles
@@ -136,7 +136,7 @@ The application relies on specific environment variables for runtime configurati
 | `GSM_CACHE_TTL_MS` | Milliseconds to cache secrets in memory to prevent GSM quota exhaustion. | `300000` (5 mins) | No |
 | `GOOGLE_CLOUD_PROJECT` | Automatically injected by GCP serverless environments. Used for trace logging. | *Injected* | No |
 
-<img width="807" height="749" alt="image" src="[https://github.com/user-attachments/assets/d4330f09-3c21-4ace-b539-9261ceb830a9](https://github.com/user-attachments/assets/d4330f09-3c21-4ace-b539-9261ceb830a9)" />
+<img width="807" height="749" alt="image" src="https://github.com/user-attachments/assets/d4330f09-3c21-4ace-b539-9261ceb830a9" />
 
 ### 3. Secret Manager Configuration
 
@@ -196,7 +196,7 @@ Authorization: Basic <base64(client_id:proxy_secret)>
 ```
 *(Note: `target_id` and `scope` can alternatively be passed as `application/x-www-form-urlencoded` or `application/json` in the POST body).*
 
-<img width="590" height="756" alt="image" src="[https://github.com/user-attachments/assets/70ffcc22-2558-4ebb-ae60-73241bd5374e](https://github.com/user-attachments/assets/70ffcc22-2558-4ebb-ae60-73241bd5374e)" />
+<img width="590" height="756" alt="image" src="https://github.com/user-attachments/assets/70ffcc22-2558-4ebb-ae60-73241bd5374e" />
 
 **Execution Flow:**
 1. The proxy validates the requested `target_id` and standardizes the inbound HTTP path.
