@@ -58,6 +58,14 @@ The Service Account executing this function requires the following IAM permissio
 * `roles/secretmanager.secretAccessor`: Required to fetch client secrets and target configurations from Google Secret Manager.
 * `roles/iam.serviceAccountTokenCreator`: Required **only** if using the `jwt_bearer` strategy. This allows the proxy to sign JWT assertions using its own service account identity.
 
+It may be difficult to identify the exact service account under which your service is executing.  The command below is helpful to identify the service account.  Apply the additional permissions to that account.
+
+```
+gcloud run services describe YOUR_SERVICE_NAME \
+  --region YOUR_REGION \
+  --format="value(spec.template.spec.serviceAccountName)"
+```
+
 ### Environment Variables
 The application relies on specific environment variables for runtime configuration:
 
