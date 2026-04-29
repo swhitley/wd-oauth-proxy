@@ -49,6 +49,9 @@ npm start
 
 ## 2. Infrastructure Configuration (GCP)
 
+<img width="1361" height="692" alt="image" src="https://github.com/user-attachments/assets/ae7c8b53-354a-4de3-9a90-c166a0ff20c2" />
+
+
 ### Required IAM Roles
 The Service Account executing this function requires the following IAM permissions to operate securely:
 
@@ -65,6 +68,8 @@ The application relies on specific environment variables for runtime configurati
 | `RATE_LIMIT_THRESHOLD` | Maximum permitted token requests per minute per client instance. | `100` | No |
 | `GSM_CACHE_TTL_MS` | Milliseconds to cache secrets in memory to prevent GSM quota exhaustion. | `300000` (5 mins) | No |
 | `GOOGLE_CLOUD_PROJECT` | Automatically injected by GCP serverless environments. Used for trace logging. | *Injected* | No |
+
+<img width="807" height="749" alt="image" src="https://github.com/user-attachments/assets/d4330f09-3c21-4ace-b539-9261ceb830a9" />
 
 ---
 
@@ -116,6 +121,11 @@ Each downstream integration requires its own secret prefixed with `TARGET_` (e.g
 Downstream enterprise systems invoke this proxy via an HTTP POST request. The proxy expects the `client_id` and a predefined proxy authentication token to be passed via standard Basic Auth, and a `target_id` to route the request appropriately.
 
 **Request Format:**
+
+<img width="590" height="756" alt="image" src="https://github.com/user-attachments/assets/70ffcc22-2558-4ebb-ae60-73241bd5374e" />
+
+On Workday's External Client CredStore, the `Token Endpoint` is the critical field for the token URL.  Workday does not pass the `Scope` field, so include the scope query string variable in the Token Endpoint field.
+
 ```http
 POST /token?target_id=GOOGLE_API&scope=https://www.googleapis.com/auth/spreadsheets HTTP/1.1
 Host: your-cloud-function-url.a.run.app
