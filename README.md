@@ -137,7 +137,7 @@ Authorization: Basic <base64(client_id:proxy_secret)>
 
 **Execution Flow:**
 1. The proxy validates the requested `target_id` and standardizes the inbound HTTP path.
-2. It decodes the Basic Auth header to extract the proxy `client_id` and `proxy_secret`.
+2. It decodes the Basic Auth header to extract the proxy `client_id` and `client_secret`.
 3. It queries `PROXY_CREDENTIALS` in Secret Manager and performs a constant-time cryptographic comparison against the expected proxy secret to prevent timing attacks.
 4. It resolves the specific `TARGET_{target_id}` configuration from Secret Manager.
 5. It validates the requested `scope` against the target's `allowed_scopes` array.
