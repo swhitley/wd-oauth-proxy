@@ -196,7 +196,8 @@ Authorization: Basic <base64(client_id:proxy_secret)>
 ```
 *(Note: `target_id` and `scope` can alternatively be passed as `application/x-www-form-urlencoded` or `application/json` in the POST body).*
 
-<img width="590" height="756" alt="image" src="https://github.com/user-attachments/assets/70ffcc22-2558-4ebb-ae60-73241bd5374e" />
+<img width="615" height="689" alt="image" src="https://github.com/user-attachments/assets/26e060d1-8b0a-4db0-a472-5d1fe27d9f86" />
+
 
 **Execution Flow:**
 1. The proxy validates the requested `target_id` and standardizes the inbound HTTP path.
